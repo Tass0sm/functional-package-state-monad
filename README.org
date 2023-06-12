@@ -1,0 +1,31 @@
+#+title: State Monad for Functional Packages
+
+* API
+
+Every value is an item in the store produced by a derivation. So when the normal
+state monad is defined as =s -> (a, s)=, =s= is the output of one derivation and
+the output pair =(a, s)= is the output of another derivation with two outputs.
+
+Then one can think about this as a function from one derivation to another
+derivation with two outputs. It's a short step to go from g-expressions to
+derivations, and they are much easier to use in the code.
+
+** Return / Pure
+
+Return takes one build expression and turns it into a build expression
+parameterized by some other state, which is then passed through to a second
+output.
+
+#+begin_src scheme
+(define (return x)
+  (lambda (state)
+    #~(begin
+        #$x
+
+        (mkdir #$output:state)
+        (copy-recursively #$state #$output:state))))
+#+end_src
+
+** Bind
+
+TODO

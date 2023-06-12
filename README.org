@@ -8,7 +8,9 @@ the output pair =(a, s)= is the output of another derivation with two outputs.
 
 Then one can think about this as a function from one derivation to another
 derivation with two outputs. It's a short step to go from g-expressions to
-derivations, and they are much easier to use in the code.
+derivations, and they are much easier to use in the code, so sometimes the
+derivation behind =(a, s)= is represented by a gexp. However, =s= must
+actually be a derivation.
 
 ** Return / Pure
 
@@ -26,6 +28,38 @@ output.
         (copy-recursively #$state #$output:state))))
 #+end_src
 
+** runState
+
+runState takes a derivation for the state and resolves the state parameterized
+derivation. It is essentially application. However, remember that s is a
+derivation.
+
+Its convenient at this point to convert the output gexp to a derivation
+
+#+begin_src scheme
+(define (runState store name ma s)
+  (run-with-store store
+    (mbegin %store-monad
+      (gexp->derivation name (ma s))))
+#+end_src
+
 ** Bind
 
-TODO
+Bind conceptually takes one state parameterized derivation and a function from
+some value (store item / derivation) to another state parameterized derivation, and it
+produces a single state parameterized derivation.
+
+#+begin_src scheme
+(define (bind store ma ma-name fmb)
+  (lambda (state)
+    (let (;; create the derivation for ma "(a, s')
+          (v (runState store ma-name ma state)))
+      ;; run fmb with the derivation v to get a gexp, which would produce a
+      ;; derivation building (b, s). that gexp is parameterized by v through
+      ;; which it can modify both
+      (fmb v))))
+#+end_src
+
+After this, one needs to turn the resulting gexp into a derivation. An
+alternative is a set of functions which immediately turns gexps into
+derivations.

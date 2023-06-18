@@ -1,69 +1,53 @@
 #+title: State Monad for Functional Packages
 #+property: header-args:scheme :tangle ./implementation.scm
 
-* TODO Formalism
+* Formalism
 
-Every value is an output directory in the store. When the normal state monad is
-defined as =s -> (a, s)=, =s= is of type "directory in the store" and =(a, s)=
-is a pair of two values with type "directory in the store". As monadic
-computations are strung together,
+The goal is to manage some mutable state needed in building certain
+packages. For instance, the racket package installation process requires this
+(https://lists.gnu.org/archive/html/guix-devel/2020-11/msg00210.html). The
+proposed solution is a state monad for functional packages. The mutable state is
+passed as an input to every derivation, and each derivation produces a modified
+copy of the state for the next step.
 
+The normal state monad is defined as =s -> (a, s)=. In this case, every value is
+a directory in the store (=Dir -> (Dir, Dir)=). We cannot handle store items in
+the code directly, but we can handle the build tasks which produce them, so we
+instead chain together these tasks. The build tasks are called derivations. This
+modifies the type somewhat because a single derivation can produce two outputs,
+which handles the =(Dir, Dir)= output. The new type is =Derivation ->
+Derivation=. Creating derivations requires an open connection to the store, and
+its cumbersome to pass this connection around. Instead, we lift this monad on
+top of the store monad which Guix already provides. The new type is =m
+Derivation -> m Derivation=. The mechanism for building up derivations through
+g-expressions actually allows some more flexibility for the type of =s=. We can
+instead make it a union of Derivations or Gexps in the store monad. However, to
+do that we need to add a bit of information for its name, because Gexp's don't
+carry that information and its useful to give a useful name to every derivation
+that is created throughout the computation. So the final type for =s= is =Pair
+(m Derivation | m Gexp) String=.
 
+=return= takes some value and makes it into a member of our monad type (a state
+parameterized monadic derivation). This input value is also of type =Pair (m
+Derivation | m Gexp) String=.
 
-A function between
-these values is a derivation or build task.
-
-On the host side all of these are ... produced by different derivations, so
-the ... the output of one derivation and the output
-pair =(a, s)= is the output of another derivation with two outputs.
-
-Then one can think about this as a function from one derivation to another
-derivation with two outputs. Derivations cannot have unknown inputs like the
-state parameter, so the output type must actually be a gexp in the
-implementation. Fortunately, It's a short step to go from g-expressions to
-derivations.
-
-This is actually a monad on top of the store monad.
-
-For total precision:
+=bind= composes a monadic-value with a function taking a non-monadic value and
+producing a monadic-value. The non-monadic value does not depend on the state
+input or the store connection, so its just a derivation. This is how one chains
+together many packages which all can read the state, build the main output, and
+then write out the modified state.
 
 #+begin_src haskell
--- the type which is a monad. derivation produces a state store item. gexp can
--- be turned into a derivation which produces (Pkg, State)
-type A = m Derivation | m Gexp
-type A = (Ungexable Name)
-type GuixState = A -> m Derivation
+type Ungexpable = m Derivation | m Gexp
+type State = Pair Ungexable String
+type GuixState = State -> m Derivation
 
--- this form of return takes a build expression which hasn't yet turned into a
--- derivation and slightly expands it to become the simplest kind of
--- state-parameterized build expression.
-return :: A -> GuixState
--- get a derivation, make a new gexp that copies input and state, compile to
--- derivation with same name.
+stateful_package_return :: State -> GuixState
+stateful_package_bind :: GuixState -> (Derivation -> GuixState) -> GuixState
 
-bind :: GuixState -> (Derivation -> GuixState) -> GuixState
--- get a lambda (m a) that when applied gives a derivation (a, s) with the name
--- already set. apply mproc to a, to get m b (a lambda which produces a
--- derivation). apply m b to s to get (a', s')
-
-
--- what's the problem? need to keep open store connection always. also need to
--- pass in a name whenever a derivation is made. bind would always have to do
--- that anyway because we can't just build huge gexps.
-
--- we can resolve the open store connection I think with the monad transformer
--- concept. we its a state monad transformer on top of the store monad.
-
--- how do we resolve the names?  now that's always a part of the definition for
--- every m value. bind is never making a derivation. that's actually why the
--- monad can't be defined with the gexp approach.
-
--- an alternative implementation would take a derivation and create a new state
--- parameterized build expression. The difference is that the build instructions
--- aren't literally included in the output. Instead, the new build expression
--- just copies all of the contents of the input package into #$output.
-return' :: Derivation -> GuixState
-runState :: State Deriv Gexp -> Deriv -> Gexp
+instance Monad GuixState where
+  return = stateful_package_return
+  bind = stateful_package_bind
 #+end_src
 
 * API
@@ -85,55 +69,15 @@ runState :: State Deriv Gexp -> Deriv -> Gexp
 
 ** COMMENT Functor Instance
 *** =fmap=
-#+begin_src scheme
-(define (fmap f fa)
-  (lambda (state)
-    (let (;; create the derivation for ma "(a, s')"
-          (v (runState store ma-name ma state)))
-      #~(begin
-          ;; TODO: apply some function on the main output to make a derivation
-          ;; producing a new main output
-          #$(f v)
-
-          ;; carry the state through
-          (mkdir #$output:state)
-          (copy-recursively #$v:state #$output:state)))))
-#+end_src
-
 ** COMMENT Applicative Instance
 *** =pure=
 *** =application=
 ** Monad Instance
-*** COMMENT =run-with-state=
-run-with-state takes a derivation for the state and resolves the state parameterized
-derivation. It is essentially application. However, remember that s is a
-derivation.
-
-Its convenient at this point to convert the output gexp to a derivation
-
-#+begin_src scheme
-(define (run-with-state store ma s)
-  (run-with-store store
-    (mbegin %store-monad
-      (gexp->derivation (stateful-gexp-name ma) ((stateful-gexp-func ma) s))))
-#+end_src
-
 *** =return=
-Return takes one build expression and turns it into a build expression
-parameterized by some other state, which is then passed through to a second
-output.
-
-Type (m derivation -> m m derivation)
-That is (Store derivation -> (State -> (Store derivation)))
 
 #+begin_src scheme
 (define (stateful-package-return x)
-  "My Return
-
-  if mstate-input is an m derivation, put it in the mlet and get a derivation
-  if mstate-input is an m (derivation output), put it in the mlet and get a (derivation output)
-  ungexp either thing in the body
-  "
+  "My Return"
   (match-lambda ((mgexp-input . name)
      (mlet %store-monad ((x-drv x)
                          (gexp-input mgexp-input))
@@ -166,6 +110,7 @@ produces a single state parameterized derivation.
 #+end_src
 
 ** Utilities
+*** =run-with-state=
 *** =get=
 
 #+begin_src scheme
@@ -212,11 +157,9 @@ profile. Imagine having a list of monadic racket packages. One can put them in a
 list and evaluate =(run-with-state (sequence list-of-pkgs) initial-state)= to
 get a list of derivations that you can actually build and add to your profile.
 
-* INPROG Example
+* Example
 
 #+begin_src scheme
-(define store (open-connection))
-
 (define initial-state
   (gexp->derivation "initial-state"
                     #~(begin
@@ -233,29 +176,25 @@ get a list of derivations that you can actually build and add to your profile.
                           (lambda (p)
                             (display 3 p))))))
 
-(define act1
-  (get))
-
 (define act12
   (stateful-package-bind (get) (lambda (x) (put new-state))))
 
 (define act123
-  (stateful-package-bind act12 (lambda (x) (stateful-package-return
-                           (gexp->derivation
-                            "act3"
-                            #~(begin
-                                (mkdir #$output)
-                                (call-with-output-file (string-append #$output "/out.txt")
-                                  (lambda (p)
-                                    (display "hello" p)))))))))
+  (stateful-package-bind
+   (stateful-package-bind
+    ;; act 1
+    (get)
+    ;; f act2
+    (lambda (x) (put new-state)))
+   ;; f act3
+   (lambda (x) (stateful-package-return
+                (gexp->derivation
+                 "act3"
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/out.txt")
+                       (lambda (p)
+                         (display "hello" p)))))))))
 
-;; (run-with-store store initial-state)
-;; (run-with-store store new-state)
-;; (run-with-store store ((stateful-package-return initial-state) (cons initial-state "initial-state")))
-;; (run-with-store store ((stateful-package-return (package->derivation hello)) (cons initial-state "initial-state")))
-;; (run-with-store store ((put new-state) (cons initial-state "initial-state")))
-
-;; (run-with-store store (act1 (cons initial-state "initial-state")))
-;; (run-with-store store (act12 (cons initial-state "initial-state")))
 (run-with-store store (act123 (cons initial-state "initial-state")))
 #+end_src

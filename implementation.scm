@@ -13,12 +13,7 @@
              (ice-9 match))
 
 (define (stateful-package-return x)
-  "My Return
-
-  if mstate-input is an m derivation, put it in the mlet and get a derivation
-  if mstate-input is an m (derivation output), put it in the mlet and get a (derivation output)
-  ungexp either thing in the body
-  "
+  "My Return"
   (match-lambda ((mgexp-input . name)
      (mlet %store-monad ((x-drv x)
                          (gexp-input mgexp-input))
@@ -74,8 +69,6 @@
                           (mkdir #$output:state)
                           (copy-recursively #$x-drv #$output:state))))))))
 
-(define store (open-connection))
-
 (define initial-state
   (gexp->derivation "initial-state"
                     #~(begin
@@ -92,28 +85,24 @@
                           (lambda (p)
                             (display 3 p))))))
 
-(define act1
-  (get))
-
 (define act12
   (stateful-package-bind (get) (lambda (x) (put new-state))))
 
 (define act123
-  (stateful-package-bind act12 (lambda (x) (stateful-package-return
-                           (gexp->derivation
-                            "act3"
-                            #~(begin
-                                (mkdir #$output)
-                                (call-with-output-file (string-append #$output "/out.txt")
-                                  (lambda (p)
-                                    (display "hello" p)))))))))
+  (stateful-package-bind
+   (stateful-package-bind
+    ;; act 1
+    (get)
+    ;; f act2
+    (lambda (x) (put new-state)))
+   ;; f act3
+   (lambda (x) (stateful-package-return
+                (gexp->derivation
+                 "act3"
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/out.txt")
+                       (lambda (p)
+                         (display "hello" p)))))))))
 
-;; (run-with-store store initial-state)
-;; (run-with-store store new-state)
-;; (run-with-store store ((stateful-package-return initial-state) (cons initial-state "initial-state")))
-;; (run-with-store store ((stateful-package-return (package->derivation hello)) (cons initial-state "initial-state")))
-;; (run-with-store store ((put new-state) (cons initial-state "initial-state")))
-
-;; (run-with-store store (act1 (cons initial-state "initial-state")))
-;; (run-with-store store (act12 (cons initial-state "initial-state")))
 (run-with-store store (act123 (cons initial-state "initial-state")))

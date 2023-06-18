@@ -8,130 +8,112 @@
              (guix build-system trivial)
              (guix licenses)
              (gnu packages)
-             (gnu packages base))
+             (gnu packages base)
 
-;; functor instance
+             (ice-9 match))
 
-;; (define (fmap f fa)
-;;   (lambda (state)
-;;     (let (;; create the derivation for ma "(a, s')"
-;;           (v (runState store ma-name ma state)))
-;;       #~(begin
-;;           ;; TODO: apply some function on the main output to make a derivation
-;;           ;; producing a new main output
-;;           #$(f v)
+(define (stateful-package-return x)
+  "My Return
 
-;;           ;; carry the state through
-;;           (mkdir #$output:state)
-;;           (copy-recursively #$v:state #$output:state)))))
+  if mstate-input is an m derivation, put it in the mlet and get a derivation
+  if mstate-input is an m (derivation output), put it in the mlet and get a (derivation output)
+  ungexp either thing in the body
+  "
+  (match-lambda ((mgexp-input . name)
+     (mlet %store-monad ((x-drv x)
+                         (gexp-input mgexp-input))
+       (gexp->derivation
+        (derivation-name x-drv)
+        (with-imported-modules '((guix build utils))
+          #~(begin
+              (use-modules (guix build utils))
 
-;; monad instance
+              (mkdir #$output)
+              (copy-recursively #$x-drv #$output)
 
-(define (run-state store name ma s)
-  (run-with-store store
-    (mbegin %store-monad
-      (gexp->derivation name (ma s)))))
+              (mkdir #$output:state)
+              (copy-recursively #$gexp-input #$output:state))))))))
 
-;; gexp lifting form
-(define (return x)
-  (lambda (state)
-    (with-imported-modules '((guix build utils))
-      #~(begin
-          (use-modules (guix build utils))
-
-          #$x
-
-          (mkdir #$output:state)
-          (copy-recursively #$state:state #$output:state)))))
-
-(define (bind store ma ma-name fmb)
-  (lambda (state)
-    (let* (;; create the derivation for ma "(a, s')
-           (v (run-state store ma-name ma state))
-           ;; (x (derivation-output-path (assoc-ref (derivation-outputs v) "out")))
-           ;; (s (derivation-output-path (assoc-ref (derivation-outputs v) "state")))
-           )
-      ;; run fmb with the derivation v to get a gexp, which would produce a
-      ;; derivation building (b, s). that gexp is parameterized by v through
-      ;; which it can modify both
-      ((fmb v) v))))
+;; m m derivation -> (derivation -> m m derivation) -> m m derivation
+(define (stateful-package-bind mma fmmb)
+  "My Bind"
+  (match-lambda ((mgexp-input . name)
+    (mlet* %store-monad ((a (mma (cons mgexp-input name)))
+                         (act2 -> (fmmb a)))
+      (act2 (cons (return (gexp (ungexp a "state"))) (derivation-name a)))))))
 
 (define (get)
-  (lambda (state)
-    (with-imported-modules '((guix build utils))
-      #~(begin
-          (use-modules (guix build utils))
+  "My Get"
+  (match-lambda ((mgexp-input . name)
+                 (mlet %store-monad ((gexp-input mgexp-input))
+                   (gexp->derivation
+                    (string-append name "-get")
+                    (with-imported-modules '((guix build utils))
+                      #~(begin
+                          (use-modules (guix build utils))
 
-          (mkdir #$output)
-          (copy-recursively #$state:state #$output)
+                          (mkdir #$output)
+                          (copy-recursively #$gexp-input #$output)
 
-          (mkdir #$output:state)
-          (copy-recursively #$state:state #$output:state)))))
+                          (mkdir #$output:state)
+                          (copy-recursively #$gexp-input #$output:state))))))))
 
 (define (put x)
-  (lambda (state)
-    (with-imported-modules '((guix build utils))
-      #~(begin
-          (use-modules (guix build utils))
+  "My Put"
+  (match-lambda ((mgexp-input . name)
+                 (mlet %store-monad ((x-drv x)
+                                     (gexp-input mgexp-input))
+                   (gexp->derivation
+                    (string-append (derivation-name x-drv) "-put")
+                    (with-imported-modules '((guix build utils))
+                      #~(begin
+                          (use-modules (guix build utils))
 
-          (mkdir #$output)
+                          (mkdir #$output)
 
-          (mkdir #$output:state)
-          (copy-recursively #$x:out #$output:state)))))
-
-;; examples
+                          (mkdir #$output:state)
+                          (copy-recursively #$x-drv #$output:state))))))))
 
 (define store (open-connection))
 
-(define initial-state-deriv
-  (run-with-store store
-    (mbegin %store-monad
-      (gexp->derivation "initial-state"
-                        #~(begin
-                            (mkdir #$output)
-                            (mkdir #$output:state)
-                            (call-with-output-file (string-append #$output:state "/state")
-                              (lambda (p)
-                                (display 0 p))))))))
+(define initial-state
+  (gexp->derivation "initial-state"
+                    #~(begin
+                        (mkdir #$output)
+                        (call-with-output-file (string-append #$output "/state")
+                          (lambda (p)
+                            (display 0 p))))))
 
-(define new-state-deriv
-  (run-with-store store
-    (mbegin %store-monad
-      (gexp->derivation "new-state"
-                        #~(begin
-                            (mkdir #$output)
-                            (mkdir #$output:state)
-                            (call-with-output-file (string-append #$output:state "/state")
-                              (lambda (p)
-                                (display 3 p))))))))
+(define new-state
+  (gexp->derivation "new-state"
+                    #~(begin
+                        (mkdir #$output)
+                        (call-with-output-file (string-append #$output "/state")
+                          (lambda (p)
+                            (display 3 p))))))
 
-;; (define (increment a num)
-;;   #~(begin
-;;       (mkdir #$output)
-;;       (call-with-output-file (string-append #$output "/state")
-;;         (lambda (p)
-;;           (display 3 p)))))
+(define act1
+  (get))
 
 (define act12
-  (bind store (get) "act1"
-        (lambda (s) (put new-state-deriv))))
-
-(define act12-deriv (run-state store "act12" act12 initial-state-deriv))
+  (stateful-package-bind (get) (lambda (x) (put new-state))))
 
 (define act123
-  (bind store
-        act12
-        "act2"
-        (lambda (s) (return #~(begin
+  (stateful-package-bind act12 (lambda (x) (stateful-package-return
+                           (gexp->derivation
+                            "act3"
+                            #~(begin
                                 (mkdir #$output)
                                 (call-with-output-file (string-append #$output "/out.txt")
                                   (lambda (p)
-                                    (display "hello" p))))))))
+                                    (display "hello" p)))))))))
 
-(define act123-deriv (run-state store "act123" act123 initial-state-deriv))
+;; (run-with-store store initial-state)
+;; (run-with-store store new-state)
+;; (run-with-store store ((stateful-package-return initial-state) (cons initial-state "initial-state")))
+;; (run-with-store store ((stateful-package-return (package->derivation hello)) (cons initial-state "initial-state")))
+;; (run-with-store store ((put new-state) (cons initial-state "initial-state")))
 
-
-;; initial-state-deriv
-;; new-state-deriv
-;; act12-deriv
-act123-deriv
+;; (run-with-store store (act1 (cons initial-state "initial-state")))
+;; (run-with-store store (act12 (cons initial-state "initial-state")))
+(run-with-store store (act123 (cons initial-state "initial-state")))

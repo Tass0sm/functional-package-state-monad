@@ -37,6 +37,10 @@
                          (act2 -> (fmmb a)))
       (act2 (cons (return (gexp (ungexp a "state"))) (derivation-name a)))))))
 
+(define-monad %stateful-package-monad
+  (bind stateful-package-bind)
+  (return stateful-package-return))
+
 (define (get)
   "My Get"
   (match-lambda ((mgexp-input . name)
@@ -85,24 +89,19 @@
                           (lambda (p)
                             (display 3 p))))))
 
-(define act12
-  (stateful-package-bind (get) (lambda (x) (put new-state))))
-
 (define act123
-  (stateful-package-bind
-   (stateful-package-bind
-    ;; act 1
-    (get)
-    ;; f act2
-    (lambda (x) (put new-state)))
-   ;; f act3
-   (lambda (x) (stateful-package-return
+  (mbegin %stateful-package-monad
+    (>>= (get)
+         (lambda (x) (put new-state))
+         (lambda (x) (stateful-package-return
                 (gexp->derivation
                  "act3"
                  #~(begin
                      (mkdir #$output)
                      (call-with-output-file (string-append #$output "/out.txt")
                        (lambda (p)
-                         (display "hello" p)))))))))
+                         (display "hello" p))))))))))
+
+(define store (open-connection))
 
 (run-with-store store (act123 (cons initial-state "initial-state")))

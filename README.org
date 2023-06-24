@@ -193,11 +193,10 @@ A -> S -> M (A x S)
   (return stateful-package-return))
 #+end_src
 
-** Latest Attempt
+** Monad Instance
 
 #+begin_src scheme
 (define (stateful-package-return value)
-  "My Return"
   (lambda (state)
     (with-monad %store-monad
       (return (cons value state)))))
@@ -205,7 +204,7 @@ A -> S -> M (A x S)
 
 #+begin_src scheme
 (define (stateful-package-bind mvalue mproc)
-  "Bind MVALUE, a value in the state monad, and pass it to MPROC."
+  "Bind MVALUE, a value in the stateful-package monad, and pass it to MPROC."
   (lambda (state)
     (mlet* %store-monad
         ((mpair -> (mvalue state))
@@ -217,20 +216,23 @@ A -> S -> M (A x S)
 #+end_src
 
 #+begin_src scheme
-;; (define (stateful-package-lift ma)
-;;   "My Lift"
-;;   (with-monad %state-monad
-;;     (return ma)))
-#+end_src
-
-#+begin_src scheme
 (define-monad %stateful-package-monad
   (bind stateful-package-bind)
   (return stateful-package-return))
 #+end_src
 
 ** Utilities
-*** get
+*** =lift=
+
+#+begin_src scheme
+(define (stateful-package-lift mvalue)
+  (lambda (state)
+    (mlet %store-monad
+        ((value mvalue))
+      (return (cons value state)))))
+#+end_src
+
+*** =get=
 #+begin_src scheme
 (define (get)
   "Return the current state as a monadic value."
@@ -239,7 +241,7 @@ A -> S -> M (A x S)
       (return (cons state state)))))
 #+end_src
 
-*** put
+*** =put=
 #+begin_src scheme
 (define (put value)
   "Set the current state to VALUE and return the previous state as a monadic
@@ -270,7 +272,6 @@ value."
 #+end_src
 
 *** COMMENT =put=
-
 #+begin_src scheme
 (define (put x)
   "My Put"
@@ -293,20 +294,20 @@ value."
 
 #+begin_src scheme
 (define initial-state
-  (gexp->derivation "initial-state"
-                    #~(begin
-                        (mkdir #$output)
-                        (call-with-output-file (string-append #$output "/state")
-                          (lambda (p)
-                            (display 0 p))))))
+  (computed-file "initial-state"
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/state")
+                       (lambda (p)
+                         (display 0 p))))))
 
 (define new-state
-  (gexp->derivation "new-state"
-                    #~(begin
-                        (mkdir #$output)
-                        (call-with-output-file (string-append #$output "/state")
-                          (lambda (p)
-                            (display 3 p))))))
+  (computed-file "new-state"
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/state")
+                       (lambda (p)
+                         (display 3 p))))))
 
 (define store (open-connection))
 #+end_src
@@ -336,7 +337,7 @@ value."
 (run-with-store store (run-with-state test 1))
 #+end_src
 
-** Example 3
+** COMMENT Example 3
 
 #+begin_src scheme
 (define mmthing1
@@ -368,7 +369,7 @@ value."
                      (mkdir #$output)
                      (call-with-output-file (string-append #$output "/out.txt")
                        (lambda (p)
-                         (display 1 p)))
+                         (display 2 p)))
 
                      (mkdir #$output:state)
                      (copy-recursively #$state #$output:state))))))
@@ -383,44 +384,16 @@ value."
 (car (run-with-store store (run-with-state mmthings initial-state)))
 #+end_src
 
-** COMMENT Example 3
-
-#+begin_src scheme
-(define act123
-  (mbegin %stateful-package-monad
-    (>>= (get)
-         (lambda (x) (put new-state))
-         (lambda (x) (stateful-package-return
-                      (gexp->derivation
-                       "act3"
-                       #~(begin
-                           (mkdir #$output)
-                           (call-with-output-file (string-append #$output "/out.txt")
-                             (lambda (p)
-                               (display "hello" p))))))))))
-#+end_src
-
-** COMMENT Example 3
-
-#+begin_src scheme
-(define act1 (return (package->derivation hello)))
-
-(run-with-store store (act1 (cons initial-state "initial-state")))
-#+end_src
-
 ** COMMENT Example 4
 #+begin_src scheme
 (define mhello
-  (mbegin %stateful-package-monad
-    (return (package->derivation hello))))
+  (stateful-package-lift (package->derivation hello)))
 
 (define mgrep
-  (mbegin %stateful-package-monad
-    (return (package->derivation grep))))
+  (stateful-package-lift (package->derivation grep)))
 
 (define msed
-  (mbegin %stateful-package-monad
-    (return (package->derivation sed))))
+  (stateful-package-lift (package->derivation sed)))
 
 (define mdrvs
   (sequence %stateful-package-monad
@@ -428,5 +401,81 @@ value."
                   mgrep
                   msed)))
 
-(run-with-store store (mdrvs (cons initial-state "initial-state")))
+(run-with-store store (run-with-state mdrvs initial-state))
+#+end_src
+
+** Example 5
+#+begin_src scheme
+(define mmthing1
+  (lambda (state)
+    (let ((pkg (package
+                 (name "thing1")
+                 (outputs (list "out" "state"))
+                 (version "0.1")
+                 (source #f)
+                 (build-system trivial-build-system)
+                 (arguments
+                  (list
+                   #:modules '((guix build utils))
+                   #:builder
+                   '(let ((out (assoc-ref %outputs "out"))
+                          (out-state (assoc-ref %outputs "state"))
+                          (state-input (assoc-ref %build-inputs "state")))
+                      (use-modules (guix build utils))
+
+                      (mkdir out)    ; create /gnu/store/...-goo
+                      (call-with-output-file (string-append out "/test")
+                        (lambda (p)
+                          (display '(hello guix) p)))
+
+                      (mkdir out-state)    ; create /gnu/store/...-goo
+                      (copy-recursively state-input out-state))))
+                 (inputs
+                  `(("state" ,@state)))
+                 (synopsis "Hello, GNU world: An example GNU package")
+                 (description "Guess what GNU Hello prints!")
+                 (home-page "https://www.gnu.org/software/hello/")
+                 (license gpl3+))))
+      (values pkg (list pkg "state")))))
+
+(define mmthing2
+  (lambda (state)
+    (let ((pkg (package
+                 (name "thing2")
+                 (outputs (list "out" "state"))
+                 (version "0.1")
+                 (source #f)
+                 (build-system trivial-build-system)
+                 (arguments
+                  (list
+                   #:modules '((guix build utils))
+                   #:builder
+                   '(let ((out (assoc-ref %outputs "out"))
+                          (out-state (assoc-ref %outputs "state"))
+                          (state-input (assoc-ref %build-inputs "state")))
+                      (use-modules (guix build utils))
+
+                      (mkdir out)    ; create /gnu/store/...-goo
+                      (call-with-output-file (string-append out "/test")
+                        (lambda (p)
+                          (display '(hello thing2) p)))
+
+                      (mkdir out-state)    ; create /gnu/store/...-goo
+                      (copy-recursively state-input out-state))))
+                 (inputs
+                  `(("state" ,@state)))
+                 (synopsis "Hello, GNU world: An example GNU package")
+                 (description "Guess what GNU Hello prints!")
+                 (home-page "https://www.gnu.org/software/hello/")
+                 (license gpl3+))))
+      (values pkg (list pkg "state")))))
+
+(define mmthings
+  (mbegin %state-monad
+    mmthing1
+    mmthing2))
+
+;; (run-with-store store (package->derivation (run-with-state mmthing1 initial-state)))
+;; (run-with-store store (package->derivation (run-with-state mmthings (list initial-state))))
+(run-with-state mmthings (list initial-state))
 #+end_src

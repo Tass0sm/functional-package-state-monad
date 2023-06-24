@@ -13,13 +13,12 @@
              (ice-9 match))
 
 (define (stateful-package-return value)
-  "My Return"
   (lambda (state)
     (with-monad %store-monad
       (return (cons value state)))))
 
 (define (stateful-package-bind mvalue mproc)
-  "Bind MVALUE, a value in the state monad, and pass it to MPROC."
+  "Bind MVALUE, a value in the stateful-package monad, and pass it to MPROC."
   (lambda (state)
     (mlet* %store-monad
         ((mpair -> (mvalue state))
@@ -29,14 +28,15 @@
          (act2 -> (mproc x)))
       (act2 s))))
 
-;; (define (stateful-package-lift ma)
-;;   "My Lift"
-;;   (with-monad %state-monad
-;;     (return ma)))
-
 (define-monad %stateful-package-monad
   (bind stateful-package-bind)
   (return stateful-package-return))
+
+(define (stateful-package-lift mvalue)
+  (lambda (state)
+    (mlet %store-monad
+        ((value mvalue))
+      (return (cons value state)))))
 
 (define (get)
   "Return the current state as a monadic value."
@@ -52,62 +52,92 @@ value."
       (return (cons state value)))))
 
 (define initial-state
-  (gexp->derivation "initial-state"
-                    #~(begin
-                        (mkdir #$output)
-                        (call-with-output-file (string-append #$output "/state")
-                          (lambda (p)
-                            (display 0 p))))))
+  (computed-file "initial-state"
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/state")
+                       (lambda (p)
+                         (display 0 p))))))
 
 (define new-state
-  (gexp->derivation "new-state"
-                    #~(begin
-                        (mkdir #$output)
-                        (call-with-output-file (string-append #$output "/state")
-                          (lambda (p)
-                            (display 3 p))))))
+  (computed-file "new-state"
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/state")
+                       (lambda (p)
+                         (display 3 p))))))
 
 (define store (open-connection))
 
 (define mmthing1
   (lambda (state)
-    (mlet* %store-monad
-        ((drv (gexp->derivation
-               "thing1"
-               (with-imported-modules '((guix build utils))
-                 #~(begin
-                     (mkdir #$output)
-                     (call-with-output-file (string-append #$output "/out.txt")
-                       (lambda (p)
-                         (display 1 p)))
+    (let ((pkg (package
+                 (name "thing1")
+                 (outputs (list "out" "state"))
+                 (version "0.1")
+                 (source #f)
+                 (build-system trivial-build-system)
+                 (arguments
+                  (list
+                   #:modules '((guix build utils))
+                   #:builder
+                   '(let ((out (assoc-ref %outputs "out"))
+                          (out-state (assoc-ref %outputs "state"))
+                          (state-input (assoc-ref %build-inputs "state")))
+                      (use-modules (guix build utils))
 
-                     (mkdir #$output:state)
-                     (call-with-output-file (string-append #$output:state "/state.txt")
-                       (lambda (p)
-                         (display 3 p))))))))
-      (return (cons drv (gexp (ungexp drv "state")))))))
+                      (mkdir out)    ; create /gnu/store/...-goo
+                      (call-with-output-file (string-append out "/test")
+                        (lambda (p)
+                          (display '(hello guix) p)))
+
+                      (mkdir out-state)    ; create /gnu/store/...-goo
+                      (copy-recursively state-input out-state))))
+                 (inputs
+                  `(("state" ,@state)))
+                 (synopsis "Hello, GNU world: An example GNU package")
+                 (description "Guess what GNU Hello prints!")
+                 (home-page "https://www.gnu.org/software/hello/")
+                 (license gpl3+))))
+      (values pkg (list pkg "state")))))
 
 (define mmthing2
   (lambda (state)
-    (mlet* %store-monad
-        ((drv (gexp->derivation
-               "thing2"
-               (with-imported-modules '((guix build utils))
-                 #~(begin
-                     (use-modules (guix build utils))
-                     (mkdir #$output)
-                     (call-with-output-file (string-append #$output "/out.txt")
-                       (lambda (p)
-                         (display 1 p)))
+    (let ((pkg (package
+                 (name "thing2")
+                 (outputs (list "out" "state"))
+                 (version "0.1")
+                 (source #f)
+                 (build-system trivial-build-system)
+                 (arguments
+                  (list
+                   #:modules '((guix build utils))
+                   #:builder
+                   '(let ((out (assoc-ref %outputs "out"))
+                          (out-state (assoc-ref %outputs "state"))
+                          (state-input (assoc-ref %build-inputs "state")))
+                      (use-modules (guix build utils))
 
-                     (mkdir #$output:state)
-                     (copy-recursively #$state #$output:state))))))
-      (return (cons drv (gexp (ungexp drv "state")))))))
+                      (mkdir out)    ; create /gnu/store/...-goo
+                      (call-with-output-file (string-append out "/test")
+                        (lambda (p)
+                          (display '(hello thing2) p)))
+
+                      (mkdir out-state)    ; create /gnu/store/...-goo
+                      (copy-recursively state-input out-state))))
+                 (inputs
+                  `(("state" ,@state)))
+                 (synopsis "Hello, GNU world: An example GNU package")
+                 (description "Guess what GNU Hello prints!")
+                 (home-page "https://www.gnu.org/software/hello/")
+                 (license gpl3+))))
+      (values pkg (list pkg "state")))))
 
 (define mmthings
-  (mbegin %stateful-package-monad
+  (mbegin %state-monad
     mmthing1
     mmthing2))
 
-
-(car (run-with-store store (run-with-state mmthings initial-state)))
+;; (run-with-store store (package->derivation (run-with-state mmthing1 initial-state)))
+;; (run-with-store store (package->derivation (run-with-state mmthings (list initial-state))))
+(run-with-state mmthings (list initial-state))

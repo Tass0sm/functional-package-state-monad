@@ -1,7 +1,7 @@
 #+title: State Monad for Functional Packages
 #+property: header-args:scheme :tangle ./implementation.scm
 
-* Formalism
+* COMMENT Old Formalism
 
 The goal is to manage some mutable state needed in building certain
 packages. For instance, the racket package installation process requires this
@@ -15,8 +15,8 @@ a directory in the store (=Dir -> (Dir, Dir)=). We cannot handle store items in
 the code directly, but we can handle the build tasks which produce them, so we
 instead chain together these tasks. The build tasks are called derivations. This
 modifies the type somewhat because a single derivation can produce two outputs,
-which handles the =(Dir, Dir)= output. The new type is =Derivation ->
-Derivation=. Creating derivations requires an open connection to the store, and
+which handles the =(Dir, Dir)= output. The new type is =Derivation -> Derivation=.
+Creating derivations requires an open connection to the store, and
 its cumbersome to pass this connection around. Instead, we lift this monad on
 top of the store monad which Guix already provides. The new type is =m
 Derivation -> m Derivation=. The mechanism for building up derivations through
@@ -50,6 +50,55 @@ instance Monad GuixState where
   bind = stateful_package_bind
 #+end_src
 
+This type isn't a valid monad because its too constrained.
+
+
+** Laws
+
+- return x >>= f == f(x)
+- ma >>= return == ma
+- (ma >>= \x -> (f(x) >>= g)) == ((ma >>= f) >>= g)
+
+* COMMENT New Formalism
+
+#+begin_src haskell
+newtype A = A Derivation Output
+
+return :: a -> State s (Store a)
+bind :: State s (Store a) -> (a -> State s (Store b)) -> State s (Store b)
+
+mmhello :: State A (Store A)
+mmhello = \s -> do
+  pkg <- packageToDerivation hello
+  return (pkg <:> out, s)
+
+mmthing1 :: State A (Store A)
+mmthing1 = \s -> do
+  pkg <- gexpToDerivation #~(begin
+                            doStuffWithS s
+                            etc)
+  return (pkg <:> "out", pkg <:> "state")
+
+mmthing2 :: State A (Store A)
+mmthing2 = \s -> do
+  pkg <- gexpToDerivation #~(begin
+                            doOtherStuffWithS s
+                            etc)
+  return (pkg <:> "out", pkg <:> "state")
+
+initialState :: A
+initialState = undefined
+
+-- hmm that's not right
+mthing2 :: Store (A, A)
+mthing2 = runState (mmthing1 >> mmthing2) initialState
+
+thing2 :: (A, A)
+thing2 = runState mthing2 store
+#+end_src
+
+Use this type as the state monad: s -> m (a, s)
+
 * API
 #+begin_src scheme
 (use-modules (guix gexp)
@@ -72,24 +121,25 @@ instance Monad GuixState where
 ** COMMENT Applicative Instance
 *** =pure=
 *** =application=
-** Monad Instance
+** COMMENT Old Monad Instance
+
 #+begin_src scheme
-(define (stateful-package-return x)
-  "My Return"
-  (match-lambda ((mgexp-input . name)
-     (mlet %store-monad ((x-drv x)
-                         (gexp-input mgexp-input))
-       (gexp->derivation
-        (derivation-name x-drv)
-        (with-imported-modules '((guix build utils))
-          #~(begin
-              (use-modules (guix build utils))
+;; (define (stateful-package-return x)
+;;   "My Return"
+;;   (match-lambda ((mgexp-input . name)
+;;      (mlet %store-monad ((x-drv x)
+;;                          (gexp-input mgexp-input))
+;;        (gexp->derivation
+;;         (derivation-name x-drv)
+;;         (with-imported-modules '((guix build utils))
+;;           #~(begin
+;;               (use-modules (guix build utils))
 
-              (mkdir #$output)
-              (copy-recursively #$x-drv #$output)
+;;               (mkdir #$output)
+;;               (copy-recursively #$x-drv #$output)
 
-              (mkdir #$output:state)
-              (copy-recursively #$gexp-input #$output:state))))))))
+;;               (mkdir #$output:state)
+;;               (copy-recursively #$gexp-input #$output:state))))))))
 #+end_src
 
 Bind conceptually takes one state parameterized derivation and a function from
@@ -98,12 +148,79 @@ produces a single state parameterized derivation.
 
 #+begin_src scheme
 ;; m m derivation -> (derivation -> m m derivation) -> m m derivation
+;; (define (stateful-package-bind mma fmmb)
+;;   "My Bind"
+;;   (match-lambda ((mgexp-input . name)
+;;     (mlet* %store-monad ((a (mma (cons mgexp-input name)))
+;;                          (act2 -> (fmmb a)))
+;;       (act2 (cons (return (gexp (ungexp a "state"))) (derivation-name a)))))))
+#+end_src
+
+** COMMENT Monad Instance
+
+A -> S -> M (A x S)
+
+#+begin_src scheme
+(define (stateful-package-return x)
+  "My Return"
+  (with-monad %state-monad
+    (return (with-monad %store-monad
+              (return x)))))
+#+end_src
+
+#+begin_src scheme
 (define (stateful-package-bind mma fmmb)
-  "My Bind"
-  (match-lambda ((mgexp-input . name)
-    (mlet* %store-monad ((a (mma (cons mgexp-input name)))
-                         (act2 -> (fmmb a)))
-      (act2 (cons (return (gexp (ungexp a "state"))) (derivation-name a)))))))
+  "My Return"
+  (with-monad %state-monad
+    (>>= mma
+         (lambda (ma)
+           (with-monad %store-monad
+             (>>= ma
+                  (lambda (a)
+                    (fmmb a))))))))
+#+end_src
+
+#+begin_src scheme
+(define (stateful-package-lift ma)
+  "My Lift"
+  (with-monad %state-monad
+    (return ma)))
+#+end_src
+
+#+begin_src scheme
+(define-monad %stateful-package-monad
+  (bind stateful-package-bind)
+  (return stateful-package-return))
+#+end_src
+
+** Latest Attempt
+
+#+begin_src scheme
+(define (stateful-package-return value)
+  "My Return"
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons value state)))))
+#+end_src
+
+#+begin_src scheme
+(define (stateful-package-bind mvalue mproc)
+  "Bind MVALUE, a value in the state monad, and pass it to MPROC."
+  (lambda (state)
+    (mlet* %store-monad
+        ((mpair -> (mvalue state))
+         (pair mpair)
+         (x -> (car pair))
+         (s -> (cdr pair))
+         (act2 -> (mproc x)))
+      (act2 s))))
+#+end_src
+
+#+begin_src scheme
+;; (define (stateful-package-lift ma)
+;;   "My Lift"
+;;   (with-monad %state-monad
+;;     (return ma)))
 #+end_src
 
 #+begin_src scheme
@@ -113,8 +230,26 @@ produces a single state parameterized derivation.
 #+end_src
 
 ** Utilities
-*** =run-with-state=
-*** =get=
+*** get
+#+begin_src scheme
+(define (get)
+  "Return the current state as a monadic value."
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons state state)))))
+#+end_src
+
+*** put
+#+begin_src scheme
+(define (put value)
+  "Set the current state to VALUE and return the previous state as a monadic
+value."
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons state value)))))
+#+end_src
+
+*** COMMENT =get=
 
 #+begin_src scheme
 (define (get)
@@ -134,7 +269,7 @@ produces a single state parameterized derivation.
                           (copy-recursively #$gexp-input #$output:state))))))))
 #+end_src
 
-*** =put=
+*** COMMENT =put=
 
 #+begin_src scheme
 (define (put x)
@@ -154,13 +289,7 @@ produces a single state parameterized derivation.
                           (copy-recursively #$x-drv #$output:state))))))))
 #+end_src
 
-*** COMMENT =sequence=
-This really gives us all the derivations which we can use in our final
-profile. Imagine having a list of monadic racket packages. One can put them in a
-list and evaluate =(run-with-state (sequence list-of-pkgs) initial-state)= to
-get a list of derivations that you can actually build and add to your profile.
-
-* Example
+* Examples
 
 #+begin_src scheme
 (define initial-state
@@ -179,20 +308,125 @@ get a list of derivations that you can actually build and add to your profile.
                           (lambda (p)
                             (display 3 p))))))
 
+(define store (open-connection))
+#+end_src
+
+** COMMENT Example 1
+
+#+begin_src scheme
+(define test
+  (with-monad %state-monad
+    (>>= (return 2)
+         (lambda (num) (set-current-state (+ 4 num)))
+         (lambda (num) (current-state))
+         (lambda (num) (return (+ 6 num))))))
+
+(run-with-state test 1)
+#+end_src
+
+** COMMENT Example 2
+#+begin_src scheme
+(define test
+  (with-monad %stateful-package-monad
+    (>>= (return 2)
+         (lambda (num) (put (+ 4 num)))
+         (lambda (num) (get))
+         (lambda (num) (return (+ 6 num))))))
+
+(run-with-store store (run-with-state test 1))
+#+end_src
+
+** Example 3
+
+#+begin_src scheme
+(define mmthing1
+  (lambda (state)
+    (mlet* %store-monad
+        ((drv (gexp->derivation
+               "thing1"
+               (with-imported-modules '((guix build utils))
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/out.txt")
+                       (lambda (p)
+                         (display 1 p)))
+
+                     (mkdir #$output:state)
+                     (call-with-output-file (string-append #$output:state "/state.txt")
+                       (lambda (p)
+                         (display 3 p))))))))
+      (return (cons drv (gexp (ungexp drv "state")))))))
+
+(define mmthing2
+  (lambda (state)
+    (mlet* %store-monad
+        ((drv (gexp->derivation
+               "thing2"
+               (with-imported-modules '((guix build utils))
+                 #~(begin
+                     (use-modules (guix build utils))
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/out.txt")
+                       (lambda (p)
+                         (display 1 p)))
+
+                     (mkdir #$output:state)
+                     (copy-recursively #$state #$output:state))))))
+      (return (cons drv (gexp (ungexp drv "state")))))))
+
+(define mmthings
+  (mbegin %stateful-package-monad
+    mmthing1
+    mmthing2))
+
+
+(car (run-with-store store (run-with-state mmthings initial-state)))
+#+end_src
+
+** COMMENT Example 3
+
+#+begin_src scheme
 (define act123
   (mbegin %stateful-package-monad
     (>>= (get)
          (lambda (x) (put new-state))
          (lambda (x) (stateful-package-return
-                (gexp->derivation
-                 "act3"
-                 #~(begin
-                     (mkdir #$output)
-                     (call-with-output-file (string-append #$output "/out.txt")
-                       (lambda (p)
-                         (display "hello" p))))))))))
+                      (gexp->derivation
+                       "act3"
+                       #~(begin
+                           (mkdir #$output)
+                           (call-with-output-file (string-append #$output "/out.txt")
+                             (lambda (p)
+                               (display "hello" p))))))))))
+#+end_src
 
-(define store (open-connection))
+** COMMENT Example 3
 
-(run-with-store store (act123 (cons initial-state "initial-state")))
+#+begin_src scheme
+(define act1 (return (package->derivation hello)))
+
+(run-with-store store (act1 (cons initial-state "initial-state")))
+#+end_src
+
+** COMMENT Example 4
+#+begin_src scheme
+(define mhello
+  (mbegin %stateful-package-monad
+    (return (package->derivation hello))))
+
+(define mgrep
+  (mbegin %stateful-package-monad
+    (return (package->derivation grep))))
+
+(define msed
+  (mbegin %stateful-package-monad
+    (return (package->derivation sed))))
+
+(define mdrvs
+  (sequence %stateful-package-monad
+            (list mhello
+                  mgrep
+                  msed)))
+
+(run-with-store store (mdrvs (cons initial-state "initial-state")))
 #+end_src

@@ -12,66 +12,44 @@
 
              (ice-9 match))
 
-(define (stateful-package-return x)
+(define (stateful-package-return value)
   "My Return"
-  (match-lambda ((mgexp-input . name)
-     (mlet %store-monad ((x-drv x)
-                         (gexp-input mgexp-input))
-       (gexp->derivation
-        (derivation-name x-drv)
-        (with-imported-modules '((guix build utils))
-          #~(begin
-              (use-modules (guix build utils))
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons value state)))))
 
-              (mkdir #$output)
-              (copy-recursively #$x-drv #$output)
+(define (stateful-package-bind mvalue mproc)
+  "Bind MVALUE, a value in the state monad, and pass it to MPROC."
+  (lambda (state)
+    (mlet* %store-monad
+        ((mpair -> (mvalue state))
+         (pair mpair)
+         (x -> (car pair))
+         (s -> (cdr pair))
+         (act2 -> (mproc x)))
+      (act2 s))))
 
-              (mkdir #$output:state)
-              (copy-recursively #$gexp-input #$output:state))))))))
-
-;; m m derivation -> (derivation -> m m derivation) -> m m derivation
-(define (stateful-package-bind mma fmmb)
-  "My Bind"
-  (match-lambda ((mgexp-input . name)
-    (mlet* %store-monad ((a (mma (cons mgexp-input name)))
-                         (act2 -> (fmmb a)))
-      (act2 (cons (return (gexp (ungexp a "state"))) (derivation-name a)))))))
+;; (define (stateful-package-lift ma)
+;;   "My Lift"
+;;   (with-monad %state-monad
+;;     (return ma)))
 
 (define-monad %stateful-package-monad
   (bind stateful-package-bind)
   (return stateful-package-return))
 
 (define (get)
-  "My Get"
-  (match-lambda ((mgexp-input . name)
-                 (mlet %store-monad ((gexp-input mgexp-input))
-                   (gexp->derivation
-                    (string-append name "-get")
-                    (with-imported-modules '((guix build utils))
-                      #~(begin
-                          (use-modules (guix build utils))
+  "Return the current state as a monadic value."
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons state state)))))
 
-                          (mkdir #$output)
-                          (copy-recursively #$gexp-input #$output)
-
-                          (mkdir #$output:state)
-                          (copy-recursively #$gexp-input #$output:state))))))))
-
-(define (put x)
-  "My Put"
-  (match-lambda ((mgexp-input . name)
-                 (mlet %store-monad ((x-drv x)
-                                     (gexp-input mgexp-input))
-                   (gexp->derivation
-                    (string-append (derivation-name x-drv) "-put")
-                    (with-imported-modules '((guix build utils))
-                      #~(begin
-                          (use-modules (guix build utils))
-
-                          (mkdir #$output)
-
-                          (mkdir #$output:state)
-                          (copy-recursively #$x-drv #$output:state))))))))
+(define (put value)
+  "Set the current state to VALUE and return the previous state as a monadic
+value."
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons state value)))))
 
 (define initial-state
   (gexp->derivation "initial-state"
@@ -89,19 +67,47 @@
                           (lambda (p)
                             (display 3 p))))))
 
-(define act123
-  (mbegin %stateful-package-monad
-    (>>= (get)
-         (lambda (x) (put new-state))
-         (lambda (x) (stateful-package-return
-                (gexp->derivation
-                 "act3"
+(define store (open-connection))
+
+(define mmthing1
+  (lambda (state)
+    (mlet* %store-monad
+        ((drv (gexp->derivation
+               "thing1"
+               (with-imported-modules '((guix build utils))
                  #~(begin
                      (mkdir #$output)
                      (call-with-output-file (string-append #$output "/out.txt")
                        (lambda (p)
-                         (display "hello" p))))))))))
+                         (display 1 p)))
 
-(define store (open-connection))
+                     (mkdir #$output:state)
+                     (call-with-output-file (string-append #$output:state "/state.txt")
+                       (lambda (p)
+                         (display 3 p))))))))
+      (return (cons drv (gexp (ungexp drv "state")))))))
 
-(run-with-store store (act123 (cons initial-state "initial-state")))
+(define mmthing2
+  (lambda (state)
+    (mlet* %store-monad
+        ((drv (gexp->derivation
+               "thing2"
+               (with-imported-modules '((guix build utils))
+                 #~(begin
+                     (use-modules (guix build utils))
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/out.txt")
+                       (lambda (p)
+                         (display 1 p)))
+
+                     (mkdir #$output:state)
+                     (copy-recursively #$state #$output:state))))))
+      (return (cons drv (gexp (ungexp drv "state")))))))
+
+(define mmthings
+  (mbegin %stateful-package-monad
+    mmthing1
+    mmthing2))
+
+
+(car (run-with-store store (run-with-state mmthings initial-state)))

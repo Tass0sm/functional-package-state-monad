@@ -1,0 +1,287 @@
+#+title: State Monad for Functional Packages
+#+property: header-args:scheme :tangle ./implementation.scm
+
+* COMMENT Old Formalism
+
+The goal is to manage some mutable state needed in building certain
+packages. For instance, the racket package installation process requires this
+(https://lists.gnu.org/archive/html/guix-devel/2020-11/msg00210.html). The
+proposed solution is a state monad for functional packages. The mutable state is
+passed as an input to every derivation, and each derivation produces a modified
+copy of the state for the next step.
+
+The normal state monad is defined as =s -> (a, s)=. In this case, every value is
+a directory in the store (=Dir -> (Dir, Dir)=). We cannot handle store items in
+the code directly, but we can handle the build tasks which produce them, so we
+instead chain together these tasks. The build tasks are called derivations. This
+modifies the type somewhat because a single derivation can produce two outputs,
+which handles the =(Dir, Dir)= output. The new type is =Derivation -> Derivation=.
+Creating derivations requires an open connection to the store, and
+its cumbersome to pass this connection around. Instead, we lift this monad on
+top of the store monad which Guix already provides. The new type is =m
+Derivation -> m Derivation=. The mechanism for building up derivations through
+g-expressions actually allows some more flexibility for the type of =s=. We can
+instead make it a union of Derivations or Gexps in the store monad. However, to
+do that we need to add a bit of information for its name, because Gexp's don't
+carry that information and its useful to give a useful name to every derivation
+that is created throughout the computation. So the final type for =s= is =Pair
+(m Derivation | m Gexp) String=.
+
+=return= takes some value and makes it into a member of our monad type (a state
+parameterized monadic derivation). This input value is also of type =Pair (m
+Derivation | m Gexp) String=.
+
+=bind= composes a monadic-value with a function taking a non-monadic value and
+producing a monadic-value. The non-monadic value does not depend on the state
+input or the store connection, so its just a derivation. This is how one chains
+together many packages which all can read the state, build the main output, and
+then write out the modified state.
+
+#+begin_src haskell
+type Ungexpable = m Derivation | m Gexp
+type State = Pair Ungexable String
+type GuixState = State -> m Derivation
+
+stateful_package_return :: State -> GuixState
+stateful_package_bind :: GuixState -> (Derivation -> GuixState) -> GuixState
+
+instance Monad GuixState where
+  return = stateful_package_return
+  bind = stateful_package_bind
+#+end_src
+
+This type isn't a valid monad because its too constrained.
+
+
+** Laws
+
+- return x >>= f == f(x)
+- ma >>= return == ma
+- (ma >>= \x -> (f(x) >>= g)) == ((ma >>= f) >>= g)
+
+* COMMENT New Formalism
+
+#+begin_src haskell
+newtype A = A Derivation Output
+
+return :: a -> State s (Store a)
+bind :: State s (Store a) -> (a -> State s (Store b)) -> State s (Store b)
+
+mmhello :: State A (Store A)
+mmhello = \s -> do
+  pkg <- packageToDerivation hello
+  return (pkg <:> out, s)
+
+mmthing1 :: State A (Store A)
+mmthing1 = \s -> do
+  pkg <- gexpToDerivation #~(begin
+                            doStuffWithS s
+                            etc)
+  return (pkg <:> "out", pkg <:> "state")
+
+mmthing2 :: State A (Store A)
+mmthing2 = \s -> do
+  pkg <- gexpToDerivation #~(begin
+                            doOtherStuffWithS s
+                            etc)
+  return (pkg <:> "out", pkg <:> "state")
+
+initialState :: A
+initialState = undefined
+
+-- hmm that's not right
+mthing2 :: Store (A, A)
+mthing2 = runState (mmthing1 >> mmthing2) initialState
+
+thing2 :: (A, A)
+thing2 = runState mthing2 store
+#+end_src
+
+Use this type as the state monad: s -> m (a, s)
+
+* API
+#+begin_src scheme
+(use-modules (guix gexp)
+             (guix store)
+             (guix monads)
+             (guix modules)
+             (guix packages)
+             (guix download)
+             (guix derivations)
+             (guix build-system trivial)
+             (guix licenses)
+             (gnu packages)
+             (gnu packages base)
+
+             (ice-9 match))
+#+end_src
+
+** Monad Instance
+#+begin_src scheme
+(define (stateful-package-return value)
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons value state)))))
+#+end_src
+
+#+begin_src scheme
+(define (stateful-package-bind mvalue mproc)
+  "Bind MVALUE, a value in the stateful-package monad, and pass it to MPROC."
+  (lambda (state)
+    (mlet* %store-monad
+        ((mpair -> (mvalue state))
+         (pair mpair)
+         (x -> (car pair))
+         (s -> (cdr pair))
+         (act2 -> (mproc x)))
+      (act2 s))))
+#+end_src
+
+#+begin_src scheme
+(define-monad %stateful-package-monad
+  (bind stateful-package-bind)
+  (return stateful-package-return))
+#+end_src
+
+** Utilities
+*** =lift=
+#+begin_src scheme
+(define (stateful-package-lift mvalue)
+  (lambda (state)
+    (mlet %store-monad
+        ((value mvalue))
+      (return (cons value state)))))
+#+end_src
+
+*** =get=
+#+begin_src scheme
+(define (get)
+  "Return the current state as a monadic value."
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons state state)))))
+#+end_src
+
+*** =put=
+#+begin_src scheme
+(define (put value)
+  "Set the current state to VALUE and return the previous state as a monadic
+value."
+  (lambda (state)
+    (with-monad %store-monad
+      (return (cons state value)))))
+#+end_src
+
+* Examples
+#+begin_src scheme
+(define initial-state
+  (computed-file "initial-state"
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/state")
+                       (lambda (p)
+                         (display 0 p))))))
+
+(define new-state
+  (computed-file "new-state"
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/state")
+                       (lambda (p)
+                         (display 3 p))))))
+
+(define store (open-connection))
+#+end_src
+
+** COMMENT Example 1
+
+#+begin_src scheme
+(define test
+  (with-monad %state-monad
+    (>>= (return 2)
+         (lambda (num) (set-current-state (+ 4 num)))
+         (lambda (num) (current-state))
+         (lambda (num) (return (+ 6 num))))))
+
+(run-with-state test 1)
+#+end_src
+
+** COMMENT Example 2
+#+begin_src scheme
+(define test
+  (with-monad %stateful-package-monad
+    (>>= (return 2)
+         (lambda (num) (put (+ 4 num)))
+         (lambda (num) (get))
+         (lambda (num) (return (+ 6 num))))))
+
+(run-with-store store (run-with-state test 1))
+#+end_src
+
+** COMMENT Example 3
+
+#+begin_src scheme
+(define mmthing1
+  (lambda (state)
+    (mlet* %store-monad
+        ((drv (gexp->derivation
+               "thing1"
+               (with-imported-modules '((guix build utils))
+                 #~(begin
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/out.txt")
+                       (lambda (p)
+                         (display 1 p)))
+
+                     (mkdir #$output:state)
+                     (call-with-output-file (string-append #$output:state "/state.txt")
+                       (lambda (p)
+                         (display 3 p))))))))
+      (return (cons drv (gexp (ungexp drv "state")))))))
+
+(define mmthing2
+  (lambda (state)
+    (mlet* %store-monad
+        ((drv (gexp->derivation
+               "thing2"
+               (with-imported-modules '((guix build utils))
+                 #~(begin
+                     (use-modules (guix build utils))
+                     (mkdir #$output)
+                     (call-with-output-file (string-append #$output "/out.txt")
+                       (lambda (p)
+                         (display 2 p)))
+
+                     (mkdir #$output:state)
+                     (copy-recursively #$state #$output:state))))))
+      (return (cons drv (gexp (ungexp drv "state")))))))
+
+(define mmthings
+  (mbegin %stateful-package-monad
+    mmthing1
+    mmthing2))
+
+
+(car (run-with-store store (run-with-state mmthings initial-state)))
+#+end_src
+
+** Example 4
+#+begin_src scheme
+(define mhello
+  (stateful-package-lift (package->derivation hello)))
+
+(define mgrep
+  (stateful-package-lift (package->derivation grep)))
+
+(define msed
+  (stateful-package-lift (package->derivation sed)))
+
+(define mdrvs
+  (sequence %stateful-package-monad
+            (list mhello
+                  mgrep
+                  msed)))
+
+(run-with-store store (run-with-state mdrvs initial-state))
+#+end_src
+
